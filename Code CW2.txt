@@ -1,0 +1,96 @@
+#BERT Code
+
+import torch
+from transformers import BertForSequenceClassification, BertTokenizer, AdamW, get_linear_schedule_with_warmup
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split
+from torch.nn.utils import clip_grad_norm_
+
+# Load the BERT tokenizer
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+# Example dataset (replace with your actual dataset)
+texts = ["The cat sat on the mat.", "This is a more complex sentence."]
+complexity_scores = [0.1, 0.8]  # Corresponding complexity scores for each text
+
+# Tokenize the texts and prepare input IDs, attention masks
+inputs = tokenizer(texts, padding='max_length', truncation=True, max_length=128, return_tensors='pt')
+
+# Create a TensorDataset and DataLoader
+dataset = TensorDataset(inputs['input_ids'], inputs['attention_mask'], torch.tensor(complexity_scores))
+train_dataloader = DataLoader(dataset, batch_size=16)
+
+# Initialize the pre-trained BERT model for regression (1 output for complexity score)
+model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=1)
+
+# Setup the optimizer and learning rate scheduler
+optimizer = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
+epochs = 3
+total_steps = len(train_dataloader) * epochs
+warmup_steps = int(0.1 * total_steps)
+scheduler = get_linear_schedule_with_warmup(optimizer,
+                                            num_warmup_steps=warmup_steps,
+                                            num_training_steps=total_steps)
+
+# Training Loop
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+best_loss = float('inf')  # Track best loss for early stopping
+patience = 2  # Early stopping patience
+epochs_without_improvement = 0
+
+for epoch in range(epochs):
+    model.train()
+    total_loss = 0
+    for batch in train_dataloader:
+        input_ids, attention_mask, labels = [b.to(device) for b in batch]
+
+        optimizer.zero_grad()
+
+        # Forward pass
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels.float())
+        loss = outputs.loss
+        total_loss += loss.item()
+
+        # Backward pass
+        loss.backward()
+
+        # Clip gradients to avoid explosion
+        clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+        # Update parameters
+        optimizer.step()
+        scheduler.step()
+
+    avg_loss = total_loss / len(train_dataloader)
+    print(f"Epoch {epoch + 1} | Loss: {avg_loss}")
+
+    # Early stopping based on validation loss (use validation data for evaluation)
+    if avg_loss < best_loss:
+        best_loss = avg_loss
+        torch.save(model.state_dict(), "best_model.pth")  # Save the model with the best performance
+        epochs_without_improvement = 0
+    else:
+        epochs_without_improvement += 1
+        if epochs_without_improvement >= patience:
+            print("Early stopping triggered.")
+            break
+
+#RBERTa model
+
+# Load the saved best model
+model.load_state_dict(torch.load("best_model.pth"))
+
+# Evaluate on test data (example)
+model.eval()
+with torch.no_grad():
+    input_ids = tokenizer(test_texts, padding='max_length', truncation=True, max_length=128, return_tensors='pt')['input_ids'].to(device)
+    attention_mask = tokenizer(test_texts, padding='max_length', truncation=True, max_length=128, return_tensors='pt')['attention_mask'].to(device)
+    labels = torch.tensor(test_labels).to(device)
+    
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    predictions = outputs.logits.squeeze().cpu().numpy()
+    
+    # Evaluate using metrics like MSE, R², etc.
+    print(predictions)
